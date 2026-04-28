@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+websockets
+requests
+twilio
+python-dotenv
+langgraph
+langchain
+langchain-community
+langchain-openai
+langchain-google-community
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+beautifulsoup4
