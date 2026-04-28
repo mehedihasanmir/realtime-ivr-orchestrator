@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from functools import lru_cache
 import os
+from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Optional, Tuple
 
 from dotenv import load_dotenv
@@ -32,7 +32,7 @@ def _get_int(name: str, default: int) -> int:
     try:
         return int(value)
     except ValueError as exc:
-        raise RuntimeError(f"Invalid integer for {name}: {value}") from exc
+        raise RuntimeError(f"Invalid integer for {name}: {value!r}") from exc
 
 
 def _get_float(name: str, default: float) -> float:
@@ -42,7 +42,7 @@ def _get_float(name: str, default: float) -> float:
     try:
         return float(value)
     except ValueError as exc:
-        raise RuntimeError(f"Invalid float for {name}: {value}") from exc
+        raise RuntimeError(f"Invalid float for {name}: {value!r}") from exc
 
 
 def _get_modalities() -> Tuple[str, ...]:
@@ -72,19 +72,28 @@ class Settings:
     openai_modalities: Tuple[str, ...]
     openai_input_audio_format: str
     openai_output_audio_format: str
-    openai_turn_detection: dict
+    # Stored as a tuple so the frozen dataclass remains hashable/cacheable
+    openai_turn_detection_type: str
     twilio_account_sid: Optional[str]
     twilio_auth_token: Optional[str]
     twilio_phone_number: Optional[str]
     server_host: Optional[str]
-    google_credentials_path: str
+    google_oauth_client_secrets_path: str
+    google_oauth_token_path: str
+    google_oauth_state_secret: str
     log_level: str
+
+    @property
+    def openai_turn_detection(self) -> dict:
+        """Return the turn-detection dict expected by the OpenAI session API."""
+        return {"type": self.openai_turn_detection_type}
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    openai_api_key = _require_env("OPENAI_API_KEY")
     return Settings(
-        openai_api_key=_require_env("OPENAI_API_KEY"),
+        openai_api_key=openai_api_key,
         openai_realtime_url=_get_realtime_url(),
         openai_voice=_get_env("OPENAI_VOICE", "alloy"),
         openai_temperature=_get_float("OPENAI_TEMPERATURE", 0.8),
@@ -92,11 +101,15 @@ def get_settings() -> Settings:
         openai_modalities=_get_modalities(),
         openai_input_audio_format=_get_env("OPENAI_INPUT_AUDIO_FORMAT", "g711_ulaw"),
         openai_output_audio_format=_get_env("OPENAI_OUTPUT_AUDIO_FORMAT", "g711_ulaw"),
-        openai_turn_detection={"type": "server_vad"},
+        openai_turn_detection_type=_get_env("OPENAI_TURN_DETECTION_TYPE", "server_vad"),
         twilio_account_sid=_get_env("TWILIO_ACCOUNT_SID"),
         twilio_auth_token=_get_env("TWILIO_AUTH_TOKEN"),
         twilio_phone_number=_get_env("TWILIO_PHONE_NUMBER"),
         server_host=_get_env("SERVER_HOST"),
-        google_credentials_path=_get_env("GOOGLE_APPLICATION_CREDENTIALS", "credentials.json"),
+        google_oauth_client_secrets_path=_get_env(
+            "GOOGLE_OAUTH_CLIENT_SECRETS", "client_secret.json"
+        ),
+        google_oauth_token_path=_get_env("GOOGLE_OAUTH_TOKEN_PATH", "oauth_tokens.json"),
+        google_oauth_state_secret=_get_env("GOOGLE_OAUTH_STATE_SECRET", openai_api_key),
         log_level=_get_env("LOG_LEVEL", "INFO"),
     )

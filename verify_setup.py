@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""
-Verification Script - Check all components before running the voice agent
-"""
+"""Verify all components are correctly configured before running the voice agent."""
 
 import os
 import sys
@@ -11,51 +9,47 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-print("=" * 60)
-print("AI VOICE AGENT - SETUP VERIFICATION")
-print("=" * 60)
+ROOT = Path(__file__).resolve().parent
 
-checks_passed = 0
-checks_total = 0
+_passed = 0
+_total = 0
 
 
-def check(name, condition, error_msg=""):
-    global checks_passed, checks_total
-    checks_total += 1
+def check(name: str, condition: bool, hint: str = "") -> bool:
+    global _passed, _total
+    _total += 1
+    status = "OK  " if condition else "FAIL"
+    print(f"  [{status}] {name}")
+    if not condition and hint:
+        print(f"         -> {hint}")
     if condition:
-        print(f"OK: {name}")
-        checks_passed += 1
-    else:
-        print(f"FAIL: {name}")
-        if error_msg:
-            print(f"  -> {error_msg}")
+        _passed += 1
     return condition
 
 
-print("\nCHECKING ENVIRONMENT VARIABLES...")
-print("-" * 60)
+# ------------------------------------------------------------------
+# Environment variables
+# ------------------------------------------------------------------
 
-openai_key = os.getenv("OPENAI_API_KEY")
-check("OpenAI API Key", bool(openai_key), "Missing: Set OPENAI_API_KEY in .env")
+print("\n=== Environment Variables ===")
+
+openai_key = os.getenv("OPENAI_API_KEY", "")
+check("OPENAI_API_KEY set", bool(openai_key), "Set OPENAI_API_KEY in .env")
 if openai_key:
-    check("  Starts with 'sk-proj-'", openai_key.startswith("sk-proj-"), "Invalid format")
+    check("OPENAI_API_KEY format (sk-proj-…)", openai_key.startswith("sk-proj-"), "Key should start with 'sk-proj-'")
 
-twilio_sid = os.getenv("TWILIO_ACCOUNT_SID")
-check("Twilio Account SID", bool(twilio_sid), "Missing: Set TWILIO_ACCOUNT_SID in .env")
+check("TWILIO_ACCOUNT_SID", bool(os.getenv("TWILIO_ACCOUNT_SID")), "Set TWILIO_ACCOUNT_SID in .env")
+check("TWILIO_AUTH_TOKEN",  bool(os.getenv("TWILIO_AUTH_TOKEN")),  "Set TWILIO_AUTH_TOKEN in .env")
+check("TWILIO_PHONE_NUMBER", bool(os.getenv("TWILIO_PHONE_NUMBER")), "Set TWILIO_PHONE_NUMBER in .env")
+check("SERVER_HOST (ngrok URL)", bool(os.getenv("SERVER_HOST")), "Run ngrok and set SERVER_HOST in .env")
 
-twilio_token = os.getenv("TWILIO_AUTH_TOKEN")
-check("Twilio Auth Token", bool(twilio_token), "Missing: Set TWILIO_AUTH_TOKEN in .env")
+# ------------------------------------------------------------------
+# Python packages
+# ------------------------------------------------------------------
 
-twilio_number = os.getenv("TWILIO_PHONE_NUMBER")
-check("Twilio Phone Number", bool(twilio_number), "Missing: Set TWILIO_PHONE_NUMBER in .env")
+print("\n=== Python Packages ===")
 
-server_host = os.getenv("SERVER_HOST")
-check("Server Host (Ngrok URL)", bool(server_host), "Missing: Set SERVER_HOST in .env")
-
-print("\nCHECKING PYTHON PACKAGES...")
-print("-" * 60)
-
-packages = [
+_PACKAGES = [
     "fastapi",
     "uvicorn",
     "websockets",
@@ -70,193 +64,77 @@ packages = [
     "bs4",
 ]
 
-for package in packages:
+for pkg in _PACKAGES:
     try:
-        __import__(package.replace("-", "_"))
-        check(f"Package: {package}", True)
+        __import__(pkg.replace("-", "_"))
+        check(pkg, True)
     except ImportError:
-        check(f"Package: {package}", False, f"Install with: pip install {package}")
+        check(pkg, False, f"pip install {pkg}")
 
-print("\nCHECKING FILES...")
-print("-" * 60)
+# ------------------------------------------------------------------
+# Required files
+# ------------------------------------------------------------------
 
-files = {
-    "server.py": "FastAPI entrypoint",
-    "app/main.py": "FastAPI app",
+print("\n=== Required Files ===")
+
+_FILES = {
+    "server.py": "FastAPI entry-point",
+    "app/main.py": "FastAPI application",
     "app/api/routes/voice.py": "Voice routes",
-    "app/services/openai_realtime.py": "OpenAI realtime bridge",
-    "graph_scraper.py": "Twilio call initiator",
-    "tools_scheduler.py": "LangGraph scheduler",
+    "app/services/openai_realtime.py": "OpenAI Realtime bridge",
+    "app/services/scheduler.py": "LangGraph scheduler",
+    "app/services/scraper.py": "Website scraper",
+    "app/services/twilio_calls.py": "Twilio call initiator",
+    "graph_scraper.py": "Scraper + caller LangGraph app",
     ".env": "Environment variables",
-    "credentials.json": "Google Calendar credentials",
+    "credentials.json": "Google service-account credentials",
 }
 
-root = Path(__file__).resolve().parent
+for filename, description in _FILES.items():
+    check(f"{filename}  ({description})", (ROOT / filename).exists(), f"File not found: {filename}")
 
-for filename, description in files.items():
-    filepath = root / filename
-    check(f"{filename} ({description})", filepath.exists(), f"File not found: {filename}")
+# ------------------------------------------------------------------
+# Code-level sanity checks
+# ------------------------------------------------------------------
 
-print("\nCHECKING CONFIGURATIONS...")
-print("-" * 60)
+print("\n=== Code Checks ===")
 
 try:
-    bridge_path = root / "app" / "services" / "openai_realtime.py"
-    content = bridge_path.read_text(encoding="utf-8")
+    bridge_src = (ROOT / "app" / "services" / "openai_realtime.py").read_text(encoding="utf-8")
     check(
-        "OpenAI bridge has audio modalities configured",
-        "openai_modalities" in content,
-        "Audio modalities configuration missing",
+        "openai_realtime.py — audio modalities referenced",
+        "openai_modalities" in bridge_src,
+        "Audio modalities config missing",
     )
     check(
-        "OpenAI bridge has audio.delta handler",
-        'response_type == "response.audio.delta"' in content,
-        "Audio response handler missing",
+        "openai_realtime.py — audio delta handler present",
+        'response.audio.delta' in bridge_src,
+        "Audio delta handler missing",
     )
-except Exception:
-    print("FAIL: Could not read OpenAI bridge file")
+    check(
+        "openai_realtime.py — uses asyncio.get_running_loop()",
+        "get_running_loop" in bridge_src,
+        "Still using deprecated get_event_loop()",
+    )
+except OSError:
+    check("openai_realtime.py readable", False, "Could not read the file")
 
-print("\n" + "=" * 60)
-print(f"CHECKS PASSED: {checks_passed}/{checks_total}")
-print("=" * 60)
+# ------------------------------------------------------------------
+# Summary
+# ------------------------------------------------------------------
 
-if checks_passed == checks_total:
-    print("\nAll checks passed. Setup is ready.")
-    print("\nNext steps:")
-    print("1. Make sure ngrok is running: ngrok http 8000")
-    print("2. Start the server: uvicorn server:app --reload")
-    print("3. Update Twilio webhook to: https://<YOUR_NGROK_URL>/voice/incoming")
-    print("4. Make a test call: python graph_scraper.py")
+print(f"\n{'='*50}")
+print(f"Result: {_passed}/{_total} checks passed")
+print("=" * 50)
+
+if _passed == _total:
+    print("\nAll checks passed. Ready to run.\n")
+    print("Next steps:")
+    print("  1. ngrok http 8000")
+    print("  2. uvicorn server:app --reload --host 0.0.0.0 --port 8000")
+    print("  3. Update Twilio webhook → https://<NGROK_URL>/voice/incoming")
+    print("  4. python graph_scraper.py")
 else:
-    print(f"\n{checks_total - checks_passed} issue(s) found. Fix them before running.")
-    sys.exit(1)
-#!/usr/bin/env python3
-"""
-🔍 Verification Script - Check all components before running the voice agent
-"""
-
-import os
-import sys
-from pathlib import Path
-from dotenv import load_dotenv
-
-load_dotenv()
-
-print("=" * 60)
-print("🔍 AI VOICE AGENT - SETUP VERIFICATION")
-print("=" * 60)
-
-checks_passed = 0
-checks_total = 0
-
-def check(name, condition, error_msg=""):
-    global checks_passed, checks_total
-    checks_total += 1
-    if condition:
-        print(f"✅ {name}")
-        checks_passed += 1
-    else:
-        print(f"❌ {name}")
-        if error_msg:
-            print(f"   → {error_msg}")
-    return condition
-
-print("\n📋 CHECKING ENVIRONMENT VARIABLES...")
-print("-" * 60)
-
-openai_key = os.getenv("OPENAI_API_KEY")
-check("OpenAI API Key", bool(openai_key), "Missing: Set OPENAI_API_KEY in .env")
-if openai_key:
-    check("  → Starts with 'sk-proj-'", openai_key.startswith("sk-proj-"), "Invalid format")
-
-twilio_sid = os.getenv("TWILIO_ACCOUNT_SID")
-check("Twilio Account SID", bool(twilio_sid), "Missing: Set TWILIO_ACCOUNT_SID in .env")
-
-twilio_token = os.getenv("TWILIO_AUTH_TOKEN")
-check("Twilio Auth Token", bool(twilio_token), "Missing: Set TWILIO_AUTH_TOKEN in .env")
-
-twilio_number = os.getenv("TWILIO_PHONE_NUMBER")
-check("Twilio Phone Number", bool(twilio_number), "Missing: Set TWILIO_PHONE_NUMBER in .env")
-
-server_host = os.getenv("SERVER_HOST")
-check("Server Host (Ngrok URL)", bool(server_host), "Missing: Set SERVER_HOST in .env (copy from ngrok)")
-
-print("\n📦 CHECKING PYTHON PACKAGES...")
-print("-" * 60)
-
-packages = [
-    "fastapi",
-    "uvicorn",
-    "websockets",
-    "requests",
-    "twilio",
-    "dotenv",
-    "langgraph",
-    "langchain_openai",
-    "langchain_google_community",
-    "googleapiclient",
-    "google",
-    "bs4",
-]
-
-for package in packages:
-    try:
-        __import__(package.replace("-", "_"))
-        check(f"Package: {package}", True)
-    except ImportError:
-        check(f"Package: {package}", False, f"Install with: pip install {package}")
-
-print("\n📁 CHECKING FILES...")
-print("-" * 60)
-
-files = {
-    "server.py": "FastAPI entrypoint",
-    "app/main.py": "FastAPI app",
-    "app/api/routes/voice.py": "Voice routes",
-    "app/services/openai_realtime.py": "OpenAI realtime bridge",
-    "graph_scraper.py": "Twilio call initiator",
-    "tools_scheduler.py": "LangGraph scheduler",
-    ".env": "Environment variables",
-    "credentials.json": "Google Calendar credentials",
-}
-
-root = Path(__file__).resolve().parent
-
-for filename, description in files.items():
-    filepath = root / filename
-    check(f"{filename} ({description})", filepath.exists(), f"File not found: {filename}")
-
-print("\n🌐 CHECKING CONFIGURATIONS...")
-print("-" * 60)
-
-# Check if OpenAI bridge includes audio and delta handling
-try:
-    bridge_path = root / "app" / "services" / "openai_realtime.py"
-    content = bridge_path.read_text(encoding="utf-8")
-    check(
-        "OpenAI bridge has audio modalities configured",
-        "openai_modalities" in content,
-        "Audio modalities configuration missing",
-    )
-    check(
-        "OpenAI bridge has audio.delta handler",
-        'response_type == "response.audio.delta"' in content,
-        "Audio response handler missing",
-    )
-except Exception:
-    print("❌ Could not read OpenAI bridge file")
-
-print("\n" + "=" * 60)
-print(f"✅ CHECKS PASSED: {checks_passed}/{checks_total}")
-print("=" * 60)
-
-if checks_passed == checks_total:
-    print("\n🎉 All checks passed! Your setup is ready.")
-    print("\nNext steps:")
-    print("1. Make sure ngrok is running: ngrok http 8000")
-    print("2. Start the server: uvicorn server:app --reload")
-    print("3. Update Twilio webhook to: https://<YOUR_NGROK_URL>/voice/incoming")
-    print("4. Make a test call: python graph_scraper.py")
-else:
-    print(f"\n⚠️  {checks_total - checks_passed} issue(s) found. Please fix them before running.")
+    issues = _total - _passed
+    print(f"\n{issues} issue(s) found — fix them before running.")
     sys.exit(1)

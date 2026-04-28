@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 import websockets
@@ -14,18 +14,51 @@ from app.core.config import Settings
 
 logger = logging.getLogger(__name__)
 
+_SILENCE_THRESHOLD_SECONDS = 1.0
+_SILENCE_POLL_INTERVAL = 0.5
+_MIN_AUDIO_SECONDS = 0.1
+
+_AUDIO_BYTES_PER_SECOND = {
+    "g711_ulaw": 8000,
+    "g711_alaw": 8000,
+    "pcm16": 32000,
+}
+
+
+def _estimate_base64_bytes(encoded: str) -> int:
+    padding = encoded.count("=")
+    return max(0, (len(encoded) * 3) // 4 - padding)
+
 
 @dataclass
 class _BridgeState:
     stream_sid: Optional[str] = None
     last_audio_time: Optional[float] = None
     response_in_progress: bool = False
+    buffered_audio_bytes: int = 0
+    twilio_closed: bool = False
+    user_id: Optional[str] = None
 
 
 class RealtimeBridge:
-    def __init__(self, settings: Settings, schedule_meeting: Callable[[str], str]) -> None:
+    """Bridges a Twilio WebSocket with the OpenAI Realtime API."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        schedule_meeting: Callable[[str, Optional[str]], str],
+    ) -> None:
         self.settings = settings
         self.schedule_meeting = schedule_meeting
+        bytes_per_second = _AUDIO_BYTES_PER_SECOND.get(
+            settings.openai_input_audio_format.lower(),
+            _AUDIO_BYTES_PER_SECOND["g711_ulaw"],
+        )
+        self._min_audio_bytes = int(bytes_per_second * _MIN_AUDIO_SECONDS)
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
 
     async def run(self, twilio_ws: WebSocket, default_context: str = "No data provided.") -> None:
         try:
@@ -38,8 +71,8 @@ class RealtimeBridge:
             ) as openai_ws:
                 logger.info("Connected to OpenAI Realtime API")
                 state = _BridgeState()
-                audio_task = asyncio.create_task(
-                    self._commit_audio_buffer_after_silence(openai_ws, state)
+                silence_task = asyncio.create_task(
+                    self._silence_watcher(openai_ws, state)
                 )
                 try:
                     await asyncio.gather(
@@ -48,8 +81,8 @@ class RealtimeBridge:
                         return_exceptions=True,
                     )
                 finally:
-                    audio_task.cancel()
-                    await asyncio.gather(audio_task, return_exceptions=True)
+                    silence_task.cancel()
+                    await asyncio.gather(silence_task, return_exceptions=True)
         except Exception as exc:
             logger.exception("OpenAI WebSocket connection error: %s", exc)
             try:
@@ -57,20 +90,44 @@ class RealtimeBridge:
             except Exception:
                 pass
 
-    async def _commit_audio_buffer_after_silence(self, openai_ws, state: _BridgeState) -> None:
+    # ------------------------------------------------------------------
+    # Silence watcher
+    # ------------------------------------------------------------------
+
+    async def _silence_watcher(self, openai_ws, state: _BridgeState) -> None:
+        """Commit the audio buffer after a period of silence and request a response."""
         while True:
-            await asyncio.sleep(0.5)
-            if state.last_audio_time and (asyncio.get_event_loop().time() - state.last_audio_time) > 1.0:
-                logger.info("Audio silence detected, committing buffer")
+            await asyncio.sleep(_SILENCE_POLL_INTERVAL)
+
+            if state.twilio_closed:
+                return
+
+            now = asyncio.get_running_loop().time()  # 3.10+ safe replacement for get_event_loop()
+            if (
+                state.last_audio_time is not None
+                and (now - state.last_audio_time) > _SILENCE_THRESHOLD_SECONDS
+                and not state.response_in_progress  # avoid double-trigger
+            ):
+                state.last_audio_time = None  # reset before the await to avoid re-entry
+                if state.buffered_audio_bytes < self._min_audio_bytes:
+                    logger.info(
+                        "Audio silence detected but buffer too small (%d bytes); skipping commit",
+                        state.buffered_audio_bytes,
+                    )
+                    continue
+                logger.info("Audio silence detected — committing buffer")
                 try:
                     await openai_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
                     await asyncio.sleep(0.2)
-                    if not state.response_in_progress:
-                        await openai_ws.send(json.dumps({"type": "response.create"}))
-                        state.response_in_progress = True
-                    state.last_audio_time = None
+                    await openai_ws.send(json.dumps({"type": "response.create"}))
+                    state.response_in_progress = True
+                    state.buffered_audio_bytes = 0
                 except Exception as exc:
                     logger.exception("Error committing audio buffer: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Twilio → OpenAI
+    # ------------------------------------------------------------------
 
     async def _receive_from_twilio(
         self,
@@ -80,15 +137,16 @@ class RealtimeBridge:
         default_context: str,
     ) -> None:
         try:
-            async for message in twilio_ws.iter_text():
-                data = json.loads(message)
+            async for raw in twilio_ws.iter_text():
+                data = json.loads(raw)
                 event = data.get("event")
 
                 if event == "media":
-                    state.last_audio_time = asyncio.get_event_loop().time()
                     audio_payload = data.get("media", {}).get("payload")
                     if audio_payload:
-                        logger.debug("Received audio from Twilio: %s bytes", len(audio_payload))
+                        state.last_audio_time = asyncio.get_running_loop().time()
+                        state.buffered_audio_bytes += _estimate_base64_bytes(audio_payload)
+                        logger.debug("Received audio from Twilio: %d chars", len(audio_payload))
                         await openai_ws.send(
                             json.dumps(
                                 {
@@ -101,24 +159,32 @@ class RealtimeBridge:
                 elif event == "start":
                     start = data.get("start", {})
                     state.stream_sid = start.get("streamSid")
+                    state.buffered_audio_bytes = 0
+                    state.twilio_closed = False
                     custom_params = (
                         start.get("customParameters")
                         or start.get("streamDetails", {}).get("customParameters", {})
                         or {}
                     )
+                    state.user_id = custom_params.get("user_id")
                     website_data = custom_params.get("scraped_data") or default_context
-                    logger.info("Stream started. SID: %s", state.stream_sid)
+                    logger.info("Stream started — SID: %s", state.stream_sid)
                     await self._send_session_update(openai_ws, website_data)
 
                 elif event == "stop":
                     logger.info("Call ended by Twilio")
+                    state.twilio_closed = True
                     break
+
         except WebSocketDisconnect:
             logger.info("Twilio WebSocket disconnected")
+            state.twilio_closed = True
         except ConnectionClosed:
             logger.info("Twilio WebSocket closed")
+            state.twilio_closed = True
         except Exception as exc:
             logger.exception("Error receiving from Twilio: %s", exc)
+            state.twilio_closed = True
 
     async def _send_session_update(self, openai_ws, website_data: str) -> None:
         session_update = {
@@ -147,7 +213,10 @@ class RealtimeBridge:
                             "properties": {
                                 "user_request": {
                                     "type": "string",
-                                    "description": "The user's spoken request (e.g., 'next Tuesday at 4pm')",
+                                    "description": (
+                                        "The user's spoken request "
+                                        "(e.g., 'next Tuesday at 4pm')"
+                                    ),
                                 }
                             },
                             "required": ["user_request"],
@@ -159,13 +228,19 @@ class RealtimeBridge:
         await openai_ws.send(json.dumps(session_update))
         logger.info("OpenAI session configured")
 
-    async def _receive_from_openai(self, twilio_ws: WebSocket, openai_ws, state: _BridgeState) -> None:
+    # ------------------------------------------------------------------
+    # OpenAI → Twilio
+    # ------------------------------------------------------------------
+
+    async def _receive_from_openai(
+        self, twilio_ws: WebSocket, openai_ws, state: _BridgeState
+    ) -> None:
         try:
-            async for message in openai_ws:
+            async for raw in openai_ws:
                 try:
-                    response = json.loads(message)
+                    response = json.loads(raw)
                 except json.JSONDecodeError:
-                    logger.warning("Invalid JSON from OpenAI: %s", message)
+                    logger.warning("Invalid JSON from OpenAI: %s", raw)
                     continue
 
                 response_type = response.get("type")
@@ -174,67 +249,92 @@ class RealtimeBridge:
                     error_msg = response.get("error", {}).get("message", "Unknown error")
                     logger.error("OpenAI error: %s", error_msg)
                     state.response_in_progress = False
-                    continue
 
-                if response_type == "response.created":
+                elif response_type == "response.created":
                     state.response_in_progress = True
                     logger.info("Response generation started")
 
-                if response_type == "response.audio.delta":
-                    audio_payload = response.get("delta")
-                    if not audio_payload:
-                        logger.warning("Audio delta received without payload")
-                        continue
-                    if not state.stream_sid:
-                        logger.warning("Missing stream SID; cannot send audio")
-                        continue
-                    await twilio_ws.send_json(
-                        {
-                            "event": "media",
-                            "streamSid": state.stream_sid,
-                            "media": {"payload": audio_payload},
-                        }
-                    )
-                    continue
+                elif response_type == "response.audio.delta":
+                    await self._forward_audio_to_twilio(twilio_ws, state, response)
 
-                if response_type == "response.text.delta":
-                    logger.debug("Text response: %s", response.get("text", ""))
+                elif response_type == "response.text.delta":
+                    logger.debug("Text delta: %s", response.get("delta", ""))
 
-                if response_type == "response.done":
+                elif response_type == "response.done":
                     state.response_in_progress = False
                     logger.info("Response complete")
 
-                if response_type == "response.function_call_arguments.done":
+                elif response_type == "response.function_call_arguments.done":
                     if response.get("name") == "schedule_meeting":
-                        await self._handle_schedule_meeting(openai_ws, response)
+                        await self._handle_schedule_meeting(openai_ws, response, state)
+
         except ConnectionClosed:
             logger.warning("OpenAI WebSocket closed")
         except Exception as exc:
             logger.exception("Error receiving from OpenAI: %s", exc)
 
-    async def _handle_schedule_meeting(self, openai_ws, response: dict) -> None:
+    async def _forward_audio_to_twilio(
+        self, twilio_ws: WebSocket, state: _BridgeState, response: dict
+    ) -> None:
+        audio_payload = response.get("delta")
+        if not audio_payload:
+            logger.warning("Audio delta received without payload")
+            return
+        if state.twilio_closed:
+            logger.debug("Twilio connection closed; skipping audio send")
+            return
+        if not state.stream_sid:
+            logger.warning("Missing stream SID — cannot forward audio")
+            return
+        try:
+            await twilio_ws.send_json(
+                {
+                    "event": "media",
+                    "streamSid": state.stream_sid,
+                    "media": {"payload": audio_payload},
+                }
+            )
+        except Exception as exc:
+            logger.exception("Error forwarding audio to Twilio: %s", exc)
+            state.twilio_closed = True
+
+    async def _handle_schedule_meeting(
+        self, openai_ws, response: dict, state: _BridgeState
+    ) -> None:
+        call_id = response.get("call_id")
+        if not call_id:
+            logger.warning("schedule_meeting call missing call_id: %s", response)
+            return
+
+        result_text = "Error: schedule_meeting failed."
         try:
             args = json.loads(response.get("arguments", "{}"))
             user_request = args.get("user_request")
             if not user_request:
-                logger.warning("schedule_meeting called without user_request")
-                return
+                logger.warning("schedule_meeting called without user_request argument")
+                result_text = "Error: schedule_meeting called without user_request."
+            else:
+                result_text = await asyncio.to_thread(
+                    self.schedule_meeting, user_request, state.user_id
+                )
+        except Exception as exc:
+            logger.exception("Error handling schedule_meeting: %s", exc)
+            result_text = f"Error: schedule_meeting failed: {exc}"
 
-            result_text = await asyncio.to_thread(self.schedule_meeting, user_request)
-
+        try:
             await openai_ws.send(
                 json.dumps(
                     {
                         "type": "conversation.item.create",
                         "item": {
                             "type": "function_call_output",
-                            "call_id": response.get("call_id"),
+                            "call_id": call_id,
                             "output": result_text,
                         },
                     }
                 )
             )
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.2)
             await openai_ws.send(json.dumps({"type": "response.create"}))
         except Exception as exc:
-            logger.exception("Error handling schedule_meeting: %s", exc)
+            logger.exception("Error sending schedule_meeting output: %s", exc)

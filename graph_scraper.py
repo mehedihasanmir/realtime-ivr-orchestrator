@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from typing import TypedDict
 
@@ -17,84 +19,39 @@ class AgentState(TypedDict):
     call_sid: str
 
 
-def scrape_website_node(state: AgentState):
-    text_content = scrape_website(state["url"])
-    return {"scraped_content": text_content}
+# ------------------------------------------------------------------
+# Graph nodes
+# ------------------------------------------------------------------
+
+def scrape_node(state: AgentState) -> AgentState:
+    return {"scraped_content": scrape_website(state["url"])}
 
 
-def initiate_call_node(state: AgentState):
-    call_sid = initiate_call(state["phone_number"], state["scraped_content"])
-    return {"call_sid": call_sid}
+def call_node(state: AgentState) -> AgentState:
+    return {"call_sid": initiate_call(state["phone_number"], state["scraped_content"])}
 
 
-workflow = StateGraph(AgentState)
-workflow.add_node("scraper", scrape_website_node)
-workflow.add_node("caller", initiate_call_node)
+# ------------------------------------------------------------------
+# Graph definition
+# ------------------------------------------------------------------
 
-workflow.set_entry_point("scraper")
-workflow.add_edge("scraper", "caller")
-workflow.add_edge("caller", END)
+_workflow = StateGraph(AgentState)
+_workflow.add_node("scraper", scrape_node)
+_workflow.add_node("caller", call_node)
+_workflow.set_entry_point("scraper")
+_workflow.add_edge("scraper", "caller")
+_workflow.add_edge("caller", END)
 
-app_scraper = workflow.compile()
+scraper_app = _workflow.compile()
 
+
+# ------------------------------------------------------------------
+# Entry point
+# ------------------------------------------------------------------
 
 if __name__ == "__main__":
     target_url = os.getenv("TARGET_URL", "https://www.wikipedia.org/")
-
-    # Example format: +880...
     target_phone = os.getenv("TARGET_PHONE", "+8801771469627")
 
-    app_scraper.invoke(
-        {
-            "url": target_url,
-            "phone_number": target_phone,
-        }
-    )
-import os
-from typing import TypedDict
-
-from dotenv import load_dotenv
-from langgraph.graph import StateGraph, END
-
-from app.services.scraper import scrape_website
-from app.services.twilio_calls import initiate_call
-
-load_dotenv()
-
-class AgentState(TypedDict):
-    url: str
-    phone_number: str
-    scraped_content: str
-    call_sid: str
-
-
-def scrape_website_node(state: AgentState):
-    text_content = scrape_website(state["url"])
-    return {"scraped_content": text_content}
-
-
-def initiate_call_node(state: AgentState):
-    call_sid = initiate_call(state["phone_number"], state["scraped_content"])
-    return {"call_sid": call_sid}
-
-workflow = StateGraph(AgentState)
-workflow.add_node("scraper", scrape_website_node)
-workflow.add_node("caller", initiate_call_node)
-
-workflow.set_entry_point("scraper")
-workflow.add_edge("scraper", "caller")
-workflow.add_edge("caller", END)
-
-app_scraper = workflow.compile()
-
-# --- EXECUTION ---
-if __name__ == "__main__":
-    target_url = os.getenv("TARGET_URL", "https://www.wikipedia.org/")
-
-    # Example format: +880...
-    target_phone = os.getenv("TARGET_PHONE", "+8801771469627")
-
-    app_scraper.invoke({
-        "url": target_url,
-        "phone_number": target_phone,
-    })
+    result = scraper_app.invoke({"url": target_url, "phone_number": target_phone})
+    print(f"Call initiated — SID: {result.get('call_sid')}")

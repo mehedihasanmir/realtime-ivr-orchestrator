@@ -1,15 +1,33 @@
+# Core framework
 fastapi
-uvicorn
+uvicorn[standard]
+
+# WebSocket
 websockets
+
+# HTTP
 requests
+
+# Telephony
 twilio
+
+# Env
 python-dotenv
+
+# LangChain / LangGraph
 langgraph
 langchain
-langchain-community
+langchain-core
 langchain-openai
 langchain-google-community
-google-api-python-client
-google-auth-httplib2
+
+# Google APIs
 google-auth-oauthlib
+google-auth
+google-api-python-client
+tzdata
+
+# HTML parsing
 beautifulsoup4
+
+python-multipart
