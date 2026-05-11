@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import audioop
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -35,6 +37,9 @@ class _BridgeState:
     stream_sid: Optional[str] = None
     last_audio_time: Optional[float] = None
     response_in_progress: bool = False
+    response_audio_started: bool = False
+    speech_frame_count: int = 0
+    last_rms_log_time: Optional[float] = None
     buffered_audio_bytes: int = 0
     twilio_closed: bool = False
     user_id: Optional[str] = None
@@ -50,8 +55,11 @@ class RealtimeBridge:
     ) -> None:
         self.settings = settings
         self.schedule_meeting = schedule_meeting
+        self._input_audio_format = settings.openai_input_audio_format.lower()
+        self._barge_in_rms_threshold = settings.barge_in_rms_threshold
+        self._barge_in_trigger_frames = settings.barge_in_trigger_frames
         bytes_per_second = _AUDIO_BYTES_PER_SECOND.get(
-            settings.openai_input_audio_format.lower(),
+            self._input_audio_format,
             _AUDIO_BYTES_PER_SECOND["g711_ulaw"],
         )
         self._min_audio_bytes = int(bytes_per_second * _MIN_AUDIO_SECONDS)
@@ -144,6 +152,11 @@ class RealtimeBridge:
                 if event == "media":
                     audio_payload = data.get("media", {}).get("payload")
                     if audio_payload:
+                        if state.response_in_progress and state.response_audio_started:
+                            if self._detect_barge_in(audio_payload, state):
+                                await self._handle_barge_in(
+                                    twilio_ws, openai_ws, state, confirmed_speech=False
+                                )
                         state.last_audio_time = asyncio.get_running_loop().time()
                         state.buffered_audio_bytes += _estimate_base64_bytes(audio_payload)
                         logger.debug("Received audio from Twilio: %d chars", len(audio_payload))
@@ -252,6 +265,8 @@ class RealtimeBridge:
 
                 elif response_type == "response.created":
                     state.response_in_progress = True
+                    state.response_audio_started = False
+                    state.speech_frame_count = 0
                     logger.info("Response generation started")
 
                 elif response_type == "response.audio.delta":
@@ -260,8 +275,16 @@ class RealtimeBridge:
                 elif response_type == "response.text.delta":
                     logger.debug("Text delta: %s", response.get("delta", ""))
 
+                elif response_type == "input_audio_buffer.speech_started":
+                    logger.debug("OpenAI VAD: speech_started")
+                    await self._handle_barge_in(
+                        twilio_ws, openai_ws, state, confirmed_speech=True
+                    )
+
                 elif response_type == "response.done":
                     state.response_in_progress = False
+                    state.response_audio_started = False
+                    state.speech_frame_count = 0
                     logger.info("Response complete")
 
                 elif response_type == "response.function_call_arguments.done":
@@ -276,6 +299,11 @@ class RealtimeBridge:
     async def _forward_audio_to_twilio(
         self, twilio_ws: WebSocket, state: _BridgeState, response: dict
     ) -> None:
+        if not state.response_in_progress:
+            logger.debug("Dropping audio delta while response is not active")
+            return
+        if not state.response_audio_started:
+            state.response_audio_started = True
         audio_payload = response.get("delta")
         if not audio_payload:
             logger.warning("Audio delta received without payload")
@@ -338,3 +366,88 @@ class RealtimeBridge:
             await openai_ws.send(json.dumps({"type": "response.create"}))
         except Exception as exc:
             logger.exception("Error sending schedule_meeting output: %s", exc)
+
+    async def _handle_barge_in(
+        self,
+        twilio_ws: WebSocket,
+        openai_ws,
+        state: _BridgeState,
+        confirmed_speech: bool = False,
+    ) -> None:
+        if not state.response_in_progress:
+            return
+        if not confirmed_speech and not state.response_audio_started:
+            return
+        logger.info("Barge-in detected — cancelling response and clearing Twilio audio")
+        try:
+            await openai_ws.send(json.dumps({"type": "response.cancel"}))
+        except Exception as exc:
+            logger.exception("Error cancelling response: %s", exc)
+        state.response_in_progress = False
+        state.response_audio_started = False
+        state.speech_frame_count = 0
+        await self._clear_twilio_audio(twilio_ws, state)
+
+    async def _clear_twilio_audio(self, twilio_ws: WebSocket, state: _BridgeState) -> None:
+        if state.twilio_closed or not state.stream_sid:
+            return
+        try:
+            await twilio_ws.send_json(
+                {
+                    "event": "clear",
+                    "streamSid": state.stream_sid,
+                }
+            )
+        except Exception as exc:
+            logger.exception("Error clearing Twilio audio: %s", exc)
+            state.twilio_closed = True
+
+    def _detect_barge_in(self, audio_payload: str, state: _BridgeState) -> bool:
+        rms = self._audio_rms(audio_payload)
+        if rms is None:
+            return False
+        self._log_barge_in_rms(rms, state)
+        if rms >= self._barge_in_rms_threshold:
+            state.speech_frame_count += 1
+        else:
+            state.speech_frame_count = 0
+        if state.speech_frame_count >= self._barge_in_trigger_frames:
+            state.speech_frame_count = 0
+            return True
+        return False
+
+    def _log_barge_in_rms(self, rms: int, state: _BridgeState) -> None:
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        try:
+            now = asyncio.get_running_loop().time()
+        except RuntimeError:
+            return
+        if state.last_rms_log_time is None or (now - state.last_rms_log_time) >= 1.0:
+            state.last_rms_log_time = now
+            logger.debug(
+                "Barge-in RMS=%s threshold=%s frames=%s",
+                rms,
+                self._barge_in_rms_threshold,
+                state.speech_frame_count,
+            )
+
+    def _audio_rms(self, audio_payload: str) -> Optional[int]:
+        try:
+            raw = base64.b64decode(audio_payload)
+        except Exception:
+            return None
+        if not raw:
+            return None
+        try:
+            if self._input_audio_format == "pcm16":
+                return audioop.rms(raw, 2)
+            if self._input_audio_format == "g711_ulaw":
+                pcm = audioop.ulaw2lin(raw, 2)
+                return audioop.rms(pcm, 2)
+            if self._input_audio_format == "g711_alaw":
+                pcm = audioop.alaw2lin(raw, 2)
+                return audioop.rms(pcm, 2)
+        except Exception:
+            return None
+        return None

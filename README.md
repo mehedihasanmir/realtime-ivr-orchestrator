@@ -139,6 +139,11 @@ Optional OpenAI settings (defaults are in code):
 - `OPENAI_OUTPUT_AUDIO_FORMAT`
 - `OPENAI_TURN_DETECTION_TYPE`
 
+Optional barge-in tuning (defaults are in code):
+
+- `BARGE_IN_RMS_THRESHOLD`
+- `BARGE_IN_TRIGGER_FRAMES`
+
 ## API Reference
 
 ### `GET /healthz`

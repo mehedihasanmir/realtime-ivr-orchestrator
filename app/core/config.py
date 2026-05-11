@@ -74,6 +74,8 @@ class Settings:
     openai_output_audio_format: str
     # Stored as a tuple so the frozen dataclass remains hashable/cacheable
     openai_turn_detection_type: str
+    barge_in_rms_threshold: int
+    barge_in_trigger_frames: int
     twilio_account_sid: Optional[str]
     twilio_auth_token: Optional[str]
     twilio_phone_number: Optional[str]
@@ -102,6 +104,8 @@ def get_settings() -> Settings:
         openai_input_audio_format=_get_env("OPENAI_INPUT_AUDIO_FORMAT", "g711_ulaw"),
         openai_output_audio_format=_get_env("OPENAI_OUTPUT_AUDIO_FORMAT", "g711_ulaw"),
         openai_turn_detection_type=_get_env("OPENAI_TURN_DETECTION_TYPE", "server_vad"),
+        barge_in_rms_threshold=_get_int("BARGE_IN_RMS_THRESHOLD", 120),
+        barge_in_trigger_frames=_get_int("BARGE_IN_TRIGGER_FRAMES", 1),
         twilio_account_sid=_get_env("TWILIO_ACCOUNT_SID"),
         twilio_auth_token=_get_env("TWILIO_AUTH_TOKEN"),
         twilio_phone_number=_get_env("TWILIO_PHONE_NUMBER"),
