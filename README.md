@@ -13,7 +13,7 @@
 
 ## Table of Contents
 
-- [Demo](#demo)
+<!-- - [Demo](#demo) -->
 - [Features](#features)
 - [Architecture](#architecture)
 - [How It Works](#how-it-works)
