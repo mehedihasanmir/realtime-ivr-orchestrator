@@ -26,14 +26,15 @@
 - [License](#license)
 
 ---
-
+<!-- 
 ## Demo
 
-> 📹 **Video demo:** _[Add your demo link or GIF here]_
-> 🌐 **Live link:** _[Add public URL if deployed]_
-> 🖼️ **Screenshot:** _[Add screenshot path or hosted image URL]_
+> 📹 **Video demo:** _[]_
+> 🌐 **Live link:** _[]_
+> 🖼️ **Screenshot:** _[]_
 
 ---
+ -->
 
 ## Features
 
