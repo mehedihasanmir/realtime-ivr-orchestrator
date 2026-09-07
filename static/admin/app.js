@@ -28,9 +28,13 @@ async function api(path, options = {}) {
     ...options,
     headers: { "X-Admin-Token": token, ...(options.headers || {}) },
   });
-  if (response.status === 401 || response.status === 503) {
+  if (response.status === 401) {
     showLogin();
     throw new Error("unauthorized");
+  }
+  if (response.status === 503) {
+    showLogin();
+    throw new Error("not-configured");
   }
   if (!response.ok) {
     const detail = await response.json().catch(() => ({}));
@@ -167,12 +171,19 @@ async function loadCustomers() {
 }
 
 async function loadAll() {
-  try {
-    await Promise.all([loadStats(), loadBookings(), loadCallbacks(), loadCustomers()]);
-    showDashboard();
-  } catch (err) {
-    if (err.message !== "unauthorized") toast(err.message, true);
+  await Promise.all([loadStats(), loadBookings(), loadCallbacks(), loadCustomers()]);
+  showDashboard();
+}
+
+function handleLoadError(err) {
+  if (err.message === "unauthorized") {
+    els.loginError.textContent = "Invalid token. Copy ADMIN_API_TOKEN from the server's environment.";
+  } else if (err.message === "not-configured") {
+    els.loginError.textContent = "ADMIN_API_TOKEN is not set on the server. Add it and redeploy.";
+  } else {
+    els.loginError.textContent = err.message;
   }
+  els.loginError.hidden = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -185,8 +196,8 @@ els.loginForm.addEventListener("submit", async (event) => {
   els.loginError.hidden = true;
   try {
     await loadAll();
-  } catch {
-    els.loginError.hidden = false;
+  } catch (err) {
+    handleLoadError(err);
   }
 });
 
@@ -195,7 +206,11 @@ els.logoutBtn.addEventListener("click", () => {
   showLogin();
 });
 
-els.refreshBtn.addEventListener("click", loadAll);
+els.refreshBtn.addEventListener("click", () =>
+  loadAll().catch((err) => {
+    if (err.message !== "unauthorized") toast(err.message, true);
+  })
+);
 
 document.querySelectorAll(".tab").forEach((tab) =>
   tab.addEventListener("click", () => {
@@ -229,7 +244,7 @@ document.addEventListener("click", async (event) => {
 // ---------------------------------------------------------------------------
 
 if (sessionStorage.getItem(TOKEN_KEY)) {
-  loadAll();
+  loadAll().catch(() => showLogin());
 } else {
   showLogin();
 }
