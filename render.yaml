@@ -1,0 +1,42 @@
+# Render Blueprint — deploy with "New > Blueprint" or let Render auto-detect.
+services:
+  - type: web
+    name: ai-voice-agent
+    runtime: docker
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false # set in the Render dashboard (secret)
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_PHONE_NUMBER
+        sync: false
+      - key: SERVER_HOST
+        sync: false # your-app.onrender.com (no https://)
+      - key: ADMIN_API_TOKEN
+        generateValue: true
+      - key: GMAIL_ADDRESS
+        sync: false
+      - key: GMAIL_APP_PASSWORD
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_FILE
+        value: /etc/secrets/service_account.json
+      - key: BUSINESS_CALENDAR_ID
+        sync: false
+      - key: BUSINESS_NAME
+        value: Our Office
+      - key: BUSINESS_TIMEZONE
+        value: Asia/Dhaka
+      - key: BUSINESS_DAYS
+        value: sun,mon,tue,wed,thu
+      - key: BUSINESS_OPEN
+        value: "10:00"
+      - key: BUSINESS_CLOSE
+        value: "18:00"
+      - key: SLOT_MINUTES
+        value: "30"
+      - key: LOG_LEVEL
+        value: INFO

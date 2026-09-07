@@ -7,7 +7,7 @@ from twilio.twiml.voice_response import Connect, VoiceResponse
 
 from app.core.config import get_settings
 from app.services.openai_realtime import RealtimeBridge
-from app.services.scheduler import schedule_meeting_tool
+from app.services.voice_tools import VoiceToolRegistry
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -69,7 +69,7 @@ async def handle_incoming_call(request: Request) -> Response:
 async def handle_media_stream(websocket: WebSocket) -> None:
     await websocket.accept()
     settings = get_settings()
-    bridge = RealtimeBridge(settings=settings, schedule_meeting=schedule_meeting_tool)
+    bridge = RealtimeBridge(settings=settings, tools=VoiceToolRegistry(settings))
 
     try:
         await bridge.run(websocket)

@@ -6,13 +6,14 @@ import json
 import logging
 import audioop
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Optional
 
 import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 from websockets.exceptions import ConnectionClosed
 
 from app.core.config import Settings
+from app.services.voice_tools import VoiceToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,13 @@ _AUDIO_BYTES_PER_SECOND = {
     "g711_ulaw": 8000,
     "g711_alaw": 8000,
     "pcm16": 32000,
+}
+
+# Maps legacy beta format names (still used in config/env) to GA format objects.
+_GA_AUDIO_FORMATS = {
+    "g711_ulaw": {"type": "audio/pcmu"},
+    "g711_alaw": {"type": "audio/pcma"},
+    "pcm16": {"type": "audio/pcm", "rate": 24000},
 }
 
 
@@ -51,10 +59,10 @@ class RealtimeBridge:
     def __init__(
         self,
         settings: Settings,
-        schedule_meeting: Callable[[str, Optional[str]], str],
+        tools: VoiceToolRegistry,
     ) -> None:
         self.settings = settings
-        self.schedule_meeting = schedule_meeting
+        self.tools = tools
         self._input_audio_format = settings.openai_input_audio_format.lower()
         self._barge_in_rms_threshold = settings.barge_in_rms_threshold
         self._barge_in_trigger_frames = settings.barge_in_trigger_frames
@@ -74,7 +82,6 @@ class RealtimeBridge:
                 self.settings.openai_realtime_url,
                 additional_headers={
                     "Authorization": f"Bearer {self.settings.openai_api_key}",
-                    "OpenAI-Beta": "realtime=v1",
                 },
             ) as openai_ws:
                 logger.info("Connected to OpenAI Realtime API")
@@ -200,42 +207,54 @@ class RealtimeBridge:
             state.twilio_closed = True
 
     async def _send_session_update(self, openai_ws, website_data: str) -> None:
+        # The GA API only accepts a single output modality: ["audio"] or ["text"].
+        output_modalities = (
+            ["audio"] if "audio" in self.settings.openai_modalities else ["text"]
+        )
+        input_format = _GA_AUDIO_FORMATS.get(
+            self._input_audio_format, _GA_AUDIO_FORMATS["g711_ulaw"]
+        )
+        output_format = _GA_AUDIO_FORMATS.get(
+            self.settings.openai_output_audio_format.lower(),
+            _GA_AUDIO_FORMATS["g711_ulaw"],
+        )
         session_update = {
             "type": "session.update",
             "session": {
-                "turn_detection": self.settings.openai_turn_detection,
-                "input_audio_format": self.settings.openai_input_audio_format,
-                "output_audio_format": self.settings.openai_output_audio_format,
-                "voice": self.settings.openai_voice,
+                "type": "realtime",
+                "output_modalities": output_modalities,
+                "audio": {
+                    "input": {
+                        "format": input_format,
+                        "turn_detection": self.settings.openai_turn_detection,
+                    },
+                    "output": {
+                        "format": output_format,
+                        "voice": self.settings.openai_voice,
+                    },
+                },
                 "instructions": (
-                    "You are a helpful assistant. "
-                    f"Context: {website_data}. "
-                    "If the user wants to book a meeting, call the 'schedule_meeting' tool. "
-                    "Always respond with clear audio. Be conversational and friendly."
+                    f"You are a friendly phone receptionist for "
+                    f"{self.settings.business_name}. "
+                    f"Context about us: {website_data}. "
+                    "Booking flow you MUST follow, step by step: "
+                    "1) When the caller wants a meeting, ask for their preferred "
+                    "day and time, then call check_availability. "
+                    "2) If the slot is free, say so and ask for their full name "
+                    "and email address. Read the email back letter by letter and "
+                    "get an explicit yes before continuing. "
+                    "3) Ask 'Shall I confirm the booking?' and only after a clear "
+                    "yes, call book_meeting. "
+                    "4) If a slot is busy, offer the alternative times you were "
+                    "given. "
+                    "If you cannot help, the caller asks for a human, or tools "
+                    "keep failing, call request_callback and reassure them that a "
+                    "team member will call back. "
+                    "Always respond with clear audio. Be conversational, warm and "
+                    "concise."
                 ),
-                "modalities": list(self.settings.openai_modalities),
-                "temperature": self.settings.openai_temperature,
-                "max_response_output_tokens": self.settings.openai_max_tokens,
-                "tools": [
-                    {
-                        "type": "function",
-                        "name": "schedule_meeting",
-                        "description": "Schedule a meeting on the calendar",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "user_request": {
-                                    "type": "string",
-                                    "description": (
-                                        "The user's spoken request "
-                                        "(e.g., 'next Tuesday at 4pm')"
-                                    ),
-                                }
-                            },
-                            "required": ["user_request"],
-                        },
-                    }
-                ],
+                "max_output_tokens": self.settings.openai_max_tokens,
+                "tools": self.tools.schemas,
             },
         }
         await openai_ws.send(json.dumps(session_update))
@@ -269,10 +288,10 @@ class RealtimeBridge:
                     state.speech_frame_count = 0
                     logger.info("Response generation started")
 
-                elif response_type == "response.audio.delta":
+                elif response_type == "response.output_audio.delta":
                     await self._forward_audio_to_twilio(twilio_ws, state, response)
 
-                elif response_type == "response.text.delta":
+                elif response_type == "response.output_text.delta":
                     logger.debug("Text delta: %s", response.get("delta", ""))
 
                 elif response_type == "input_audio_buffer.speech_started":
@@ -288,8 +307,7 @@ class RealtimeBridge:
                     logger.info("Response complete")
 
                 elif response_type == "response.function_call_arguments.done":
-                    if response.get("name") == "schedule_meeting":
-                        await self._handle_schedule_meeting(openai_ws, response, state)
+                    await self._handle_function_call(openai_ws, response, state)
 
         except ConnectionClosed:
             logger.warning("OpenAI WebSocket closed")
@@ -326,28 +344,25 @@ class RealtimeBridge:
             logger.exception("Error forwarding audio to Twilio: %s", exc)
             state.twilio_closed = True
 
-    async def _handle_schedule_meeting(
+    async def _handle_function_call(
         self, openai_ws, response: dict, state: _BridgeState
     ) -> None:
         call_id = response.get("call_id")
+        tool_name = response.get("name", "")
         if not call_id:
-            logger.warning("schedule_meeting call missing call_id: %s", response)
+            logger.warning("Function call missing call_id: %s", response)
             return
 
-        result_text = "Error: schedule_meeting failed."
         try:
             args = json.loads(response.get("arguments", "{}"))
-            user_request = args.get("user_request")
-            if not user_request:
-                logger.warning("schedule_meeting called without user_request argument")
-                result_text = "Error: schedule_meeting called without user_request."
-            else:
-                result_text = await asyncio.to_thread(
-                    self.schedule_meeting, user_request, state.user_id
-                )
-        except Exception as exc:
-            logger.exception("Error handling schedule_meeting: %s", exc)
-            result_text = f"Error: schedule_meeting failed: {exc}"
+        except json.JSONDecodeError:
+            logger.warning("Invalid tool arguments for %s: %s", tool_name, response)
+            args = {}
+
+        logger.info("Tool call: %s(%s) from caller %s", tool_name, args, state.user_id)
+        result_text = await asyncio.to_thread(
+            self.tools.dispatch, tool_name, args, state.user_id
+        )
 
         try:
             await openai_ws.send(
@@ -365,7 +380,7 @@ class RealtimeBridge:
             await asyncio.sleep(0.2)
             await openai_ws.send(json.dumps({"type": "response.create"}))
         except Exception as exc:
-            logger.exception("Error sending schedule_meeting output: %s", exc)
+            logger.exception("Error sending tool output for %s: %s", tool_name, exc)
 
     async def _handle_barge_in(
         self,

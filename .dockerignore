@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+__pycache__
+**/__pycache__
+*.py[cod]
+.env
+*.db
+tests
+scripts
+service_account.json
+client_secret.json
+README.md
+.vscode
+.ipynb_checkpoints

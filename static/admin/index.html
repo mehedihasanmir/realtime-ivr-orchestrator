@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Voice Agent — Admin Dashboard</title>
+  <link rel="stylesheet" href="/static/admin/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-dot"></span>
+      <h1>Voice Agent Admin</h1>
+    </div>
+    <button id="logout-btn" class="btn btn-ghost" hidden>Sign out</button>
+  </header>
+
+  <!-- Token gate -->
+  <section id="login-view" class="login-card" hidden>
+    <h2>Admin sign in</h2>
+    <p class="muted">Enter the admin token from your <code>.env</code> (ADMIN_API_TOKEN).</p>
+    <form id="login-form">
+      <input id="token-input" type="password" placeholder="Admin token" autocomplete="off" required />
+      <button type="submit" class="btn btn-primary">Sign in</button>
+    </form>
+    <p id="login-error" class="error" hidden>Invalid token. Try again.</p>
+  </section>
+
+  <!-- Dashboard -->
+  <main id="dashboard-view" hidden>
+    <section class="stats-grid" id="stats-grid">
+      <div class="stat-card"><span class="stat-value" id="stat-upcoming">–</span><span class="stat-label">Upcoming bookings</span></div>
+      <div class="stat-card"><span class="stat-value" id="stat-today">–</span><span class="stat-label">Next 24 hours</span></div>
+      <div class="stat-card"><span class="stat-value" id="stat-customers">–</span><span class="stat-label">Customers</span></div>
+      <div class="stat-card stat-warn"><span class="stat-value" id="stat-callbacks">–</span><span class="stat-label">Pending callbacks</span></div>
+    </section>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="bookings">Bookings</button>
+      <button class="tab" data-tab="callbacks">Callbacks</button>
+      <button class="tab" data-tab="customers">Customers</button>
+      <button id="refresh-btn" class="btn btn-ghost small" title="Refresh">&#8635; Refresh</button>
+    </nav>
+
+    <section id="tab-bookings" class="tab-panel">
+      <table class="data-table">
+        <thead>
+          <tr><th>When</th><th>Customer</th><th>Phone</th><th>Email</th><th>Status</th><th>Reminder</th><th></th></tr>
+        </thead>
+        <tbody id="bookings-body"></tbody>
+      </table>
+      <p id="bookings-empty" class="empty" hidden>No bookings yet.</p>
+    </section>
+
+    <section id="tab-callbacks" class="tab-panel" hidden>
+      <table class="data-table">
+        <thead>
+          <tr><th>Requested</th><th>Customer</th><th>Phone</th><th>Reason</th><th>Status</th><th></th></tr>
+        </thead>
+        <tbody id="callbacks-body"></tbody>
+      </table>
+      <p id="callbacks-empty" class="empty" hidden>No callback requests.</p>
+    </section>
+
+    <section id="tab-customers" class="tab-panel" hidden>
+      <table class="data-table">
+        <thead>
+          <tr><th>Name</th><th>Phone</th><th>Email</th><th>Bookings</th><th>Since</th></tr>
+        </thead>
+        <tbody id="customers-body"></tbody>
+      </table>
+      <p id="customers-empty" class="empty" hidden>No customers yet.</p>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="/static/admin/app.js"></script>
+</body>
+</html>

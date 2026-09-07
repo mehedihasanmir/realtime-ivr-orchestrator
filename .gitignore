@@ -7,3 +7,5 @@ __pycache__/
 .env
 client_secret.json
 oauth_tokens.json
+service_account.json
+voice_agent.db

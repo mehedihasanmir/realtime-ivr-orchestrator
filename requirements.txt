@@ -14,15 +14,11 @@ twilio
 # Env
 python-dotenv
 
-# LangChain / LangGraph
-langgraph
-langchain
-langchain-core
-langchain-openai
-langchain-google-community
+# Database (psycopg2 enables PostgreSQL via DATABASE_URL, e.g. on Render)
+sqlalchemy
+psycopg2-binary
 
-# Google APIs
-google-auth-oauthlib
+# Google Calendar (service account sync)
 google-auth
 google-api-python-client
 tzdata
@@ -31,3 +27,7 @@ tzdata
 beautifulsoup4
 
 python-multipart
+
+# --- Dev / test ---
+pytest
+httpx
