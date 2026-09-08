@@ -206,6 +206,28 @@ els.logoutBtn.addEventListener("click", () => {
   showLogin();
 });
 
+document.getElementById("call-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = document.getElementById("call-btn");
+  const phone = document.getElementById("call-phone").value.trim();
+  const url = document.getElementById("call-url").value.trim();
+  button.disabled = true;
+  button.textContent = "Calling…";
+  try {
+    const result = await api("/api/admin/calls", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone, url: url || null }),
+    });
+    toast(`Call started (SID: ${result.call_sid})`);
+  } catch (err) {
+    if (err.message !== "unauthorized") toast(err.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Call now";
+  }
+});
+
 els.refreshBtn.addEventListener("click", () =>
   loadAll().catch((err) => {
     if (err.message !== "unauthorized") toast(err.message, true);

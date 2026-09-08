@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from app.core.config import get_settings
@@ -17,6 +19,8 @@ from app.db import (
 )
 from app.services.booking import BookingService
 from app.services.notifications import EmailService
+from app.services.scraper import scrape_website
+from app.services.twilio_calls import initiate_call
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -161,3 +165,28 @@ def complete_callback(callback_id: int) -> dict:
             raise HTTPException(status_code=404, detail="Callback not found")
         callback.status = CallbackStatus.COMPLETED
     return {"ok": True}
+
+
+class OutboundCallRequest(BaseModel):
+    phone: str
+    url: str | None = None
+
+
+@router.post("/calls", dependencies=[Depends(require_admin)])
+def place_outbound_call(payload: OutboundCallRequest) -> dict:
+    phone = payload.phone.strip().replace(" ", "").replace("-", "")
+    if not re.fullmatch(r"\+\d{8,15}", phone):
+        raise HTTPException(
+            status_code=400,
+            detail="Phone must be in E.164 format, e.g. +8801771469627",
+        )
+    context = scrape_website(payload.url) if payload.url else "No data provided."
+    try:
+        call_sid = initiate_call(phone, context)
+    except ValueError as exc:
+        # Missing SERVER_HOST or Twilio credentials.
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Outbound call to %s failed: %s", phone, exc)
+        raise HTTPException(status_code=502, detail=f"Twilio call failed: {exc}")
+    return {"ok": True, "call_sid": call_sid}

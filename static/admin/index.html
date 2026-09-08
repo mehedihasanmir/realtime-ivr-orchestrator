@@ -28,6 +28,18 @@
 
   <!-- Dashboard -->
   <main id="dashboard-view" hidden>
+    <section class="call-card">
+      <div class="call-card-text">
+        <h2>Place outbound call</h2>
+        <p class="muted">The AI agent will call this number and can book a meeting.</p>
+      </div>
+      <form id="call-form">
+        <input id="call-phone" type="tel" placeholder="+8801XXXXXXXXX" required />
+        <input id="call-url" type="url" placeholder="Context URL (optional)" />
+        <button type="submit" class="btn btn-primary" id="call-btn">Call now</button>
+      </form>
+    </section>
+
     <section class="stats-grid" id="stats-grid">
       <div class="stat-card"><span class="stat-value" id="stat-upcoming">–</span><span class="stat-label">Upcoming bookings</span></div>
       <div class="stat-card"><span class="stat-value" id="stat-today">–</span><span class="stat-label">Next 24 hours</span></div>

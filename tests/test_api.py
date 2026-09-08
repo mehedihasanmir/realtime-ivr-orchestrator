@@ -99,6 +99,24 @@ def test_admin_callback_complete(client, settings):
     assert callbacks[0]["status"] == "completed"
 
 
+def test_admin_outbound_call_validation(client):
+    # Requires auth.
+    assert client.post("/api/admin/calls", json={"phone": "+8801700000000"}).status_code == 401
+
+    # Invalid phone format.
+    bad = client.post(
+        "/api/admin/calls", json={"phone": "not-a-number"}, headers=AUTH
+    )
+    assert bad.status_code == 400
+    assert "E.164" in bad.json()["detail"]
+
+    # Valid phone but Twilio is not configured in tests -> clean 400, not a crash.
+    response = client.post(
+        "/api/admin/calls", json={"phone": "+8801700000000"}, headers=AUTH
+    )
+    assert response.status_code == 400
+
+
 # ---------------------------------------------------------------------------
 # Public cancel flow
 # ---------------------------------------------------------------------------
